@@ -2,6 +2,7 @@
 # - 先頭行の表示（既定50）
 # - 2変数を選んで回帰の「決定境界」（予測ヒートマップ）を可視化（他特徴量は中央値で固定）
 # - 決定木（回帰木）のハイパーパラメータ調整、評価指標（R2 / RMSE / MAE）、木の図、重要度
+# - 緯度経度×価格の地図（Folium / サークル or HeatMap 切替）
 # -----------------------------------------------------------------
 
 import numpy as np
@@ -89,7 +90,111 @@ min_samples_leaf = st.sidebar.slider("最小葉ノード / min_samples_leaf", 1,
 cv_k = st.sidebar.slider("交差検証分割数 / CV folds", 2, 10, 5, 1)
 
 # ---------------------------------------------------------------
-# 3) 先頭行の確認
+# 🗺️ 地図で可視化（“データセット表示の上”に配置）
+# ---------------------------------------------------------------
+with st.expander("🗺️ 地図で可視化（緯度経度 × 住宅価格）"):
+    st.markdown(
+        """
+        California Housing の各地区を **緯度・経度** に配置し、色で **住宅価格（MedHouseVal, ×100k USD）** を表します。  
+        *Folium = インタラクティブ地図（サークル / HeatMap 切替） / Matplotlib = 静止画プロット*
+        """
+    )
+
+    # 地図表示用データ
+    df_map = X_full.copy()
+    df_map["MedHouseVal"] = y
+
+    # 表示点数を間引き（インタラクティブ時の負荷軽減）
+    max_show = st.slider(
+        "表示点数（サンプリング）", min_value=1000, max_value=len(df_map), value=min(5000, len(df_map)), step=1000
+    )
+    # random_state はサイドバー入力を流用
+    df_show = df_map.sample(max_show, random_state=int(random_state) if "random_state" in locals() else 42)
+
+    view = st.radio("表示方法", ["Folium（インタラクティブ）", "Matplotlib（静止画）"], index=0, horizontal=True)
+
+    if view.startswith("Folium"):
+        import folium
+        from streamlit_folium import st_folium
+        import matplotlib.cm as cm
+        import matplotlib.colors as colors
+        from folium.plugins import HeatMap
+
+        # ベースマップ（平均位置へ）
+        m = folium.Map(
+            location=[float(df_map["Latitude"].mean()), float(df_map["Longitude"].mean())],
+            zoom_start=6,
+            tiles="CartoDB positron",
+        )
+
+        # 表示レイヤー切替
+        layer_mode = st.radio("レイヤー種別", ["サークルマーカー", "HeatMap（密度重み付き）"], index=0, horizontal=True)
+
+        vmin, vmax = float(df_map["MedHouseVal"].min()), float(df_map["MedHouseVal"].max())
+
+        if layer_mode == "サークルマーカー":
+            # カラーマップ設定
+            norm = colors.Normalize(vmin=vmin, vmax=vmax)
+            cmap = cm.get_cmap("viridis")
+
+            # サークルマーカー（価格で着色）
+            for _, r in df_show.iterrows():
+                color = colors.to_hex(cmap(norm(float(r["MedHouseVal"]))))
+                folium.CircleMarker(
+                    location=[float(r["Latitude"]), float(r["Longitude"])],
+                    radius=3,
+                    color=color,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.85,
+                    popup=f"MedHouseVal: {r['MedHouseVal']:.2f}",
+                ).add_to(m)
+
+            st.caption(f"色スケール: {vmin:.2f} 〜 {vmax:.2f} (×100k USD)")
+
+        else:
+            # HeatMap パラメータ
+            radius = st.slider("HeatMap: radius（ぼかし半径）", 3, 30, 12, 1)
+            blur   = st.slider("HeatMap: blur（ボケ具合）",  3, 30, 18, 1)
+            max_z  = st.slider("HeatMap: max_zoom", 1, 18, 13, 1)
+
+            # 重み（価格）を 0〜1 に正規化してヒートマップへ
+            denom = (vmax - vmin) if (vmax - vmin) > 0 else 1.0
+            heat_data = [
+                [float(r["Latitude"]), float(r["Longitude"]), (float(r["MedHouseVal"]) - vmin) / denom]
+                for _, r in df_show.iterrows()
+            ]
+
+            HeatMap(
+                heat_data,
+                radius=radius,
+                blur=blur,
+                max_zoom=max_z,
+                min_opacity=0.2,
+                max_val=1.0,  # 重みは0-1スケール
+            ).add_to(m)
+
+            st.caption("HeatMapの重み：MedHouseVal を 0〜1 に正規化（高価格ほど高強度）")
+
+        # 地図表示
+        st_folium(m, height=600, use_container_width=True)
+
+    else:
+        # 静止画：経度をX、緯度をY
+        fig, ax = plt.subplots(figsize=(7, 6), dpi=140)
+        sc = ax.scatter(
+            df_show["Longitude"], df_show["Latitude"],
+            c=df_show["MedHouseVal"], s=8
+        )
+        cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("MedHouseVal (×100k USD)")
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+        ax.set_title("California Housing: Price map")
+        st.pyplot(fig, use_container_width=True)
+
+# ---------------------------------------------------------------
+# 3) 先頭行の確認（※地図セクションの“下”に移動）
 # ---------------------------------------------------------------
 st.markdown("### 1) データの確認（先頭行）")
 st.dataframe(pd.concat([X_full, y.rename("MedHouseVal")], axis=1).head(show_rows), use_container_width=True)
@@ -136,102 +241,3 @@ with left:
     if x_axis and y_axis:
         # 中央値で固定した入力ベクトルを作る
         base = X_full[selected_features].median() if selected_features else X_full.median()
-        # グリッド作成
-        x_vals = np.linspace(X_full[x_axis].min(), X_full[x_axis].max(), 150)
-        y_vals = np.linspace(X_full[y_axis].min(), X_full[y_axis].max(), 150)
-        xx, yy = np.meshgrid(x_vals, y_vals)
-        grid = pd.DataFrame({col: np.full(xx.size, base[col] if col in base.index else X_full[col].median())
-                             for col in (selected_features if selected_features else feature_names)})
-        grid[x_axis] = xx.ravel()
-        grid[y_axis] = yy.ravel()
-
-        Z = reg.predict(grid.values).reshape(xx.shape)
-        fig_hm, ax_hm = plt.subplots(figsize=(7, 5.2), dpi=140)
-        hm = ax_hm.contourf(xx, yy, Z, levels=18, alpha=0.9)
-        cbar = fig_hm.colorbar(hm, ax=ax_hm, fraction=0.046, pad=0.04)
-        cbar.set_label("Predicted MedHouseVal (×100k USD)")
-        ax_hm.set_xlabel(x_axis)
-        ax_hm.set_ylabel(y_axis)
-        ax_hm.set_title("Decision regions (regression heatmap)")
-        st.pyplot(fig_hm, use_container_width=True)
-
-with right:
-    st.markdown("### 4) 回帰木の図 / Tree plot")
-    fig_tr, ax_tr = plt.subplots(figsize=(12, 10), dpi=160)
-    plot_tree(
-        reg,
-        feature_names=(selected_features if selected_features else feature_names),
-        filled=False,
-        impurity=True,
-        rounded=True,
-        ax=ax_tr,
-    )
-    st.pyplot(fig_tr, use_container_width=True)
-
-    st.markdown("### 5) 特徴量の重要度 / Feature importances")
-    importances = pd.Series(reg.feature_importances_, index=(selected_features if selected_features else feature_names))
-    st.dataframe(importances.sort_values(ascending=False).to_frame("importance"))
-
-# ---------------------------------------------------------------
-# 6) 解説（パラメータ）
-# ---------------------------------------------------------------
-with st.expander("🧮 パラメータ解説：max_depth / min_samples_split / min_samples_leaf"):
-    st.markdown(
-        """
-        - **max_depth**：木の深さの上限。大きくすると複雑→過学習リスク。小さくすると単純→表現力不足の恐れ。
-        - **min_samples_split**：ノードを分割するための最小サンプル数。大きめにすると細かい分岐を抑制。
-        - **min_samples_leaf**：葉に残す最小サンプル数。極小葉を防ぎ、汎化を安定化。
-        """
-    )
-
-# ---------------------------------------------------------------
-# 7) requirements.txt（コピー用）
-# ---------------------------------------------------------------
-REQ_TXT = """
-streamlit>=1.37
-scikit-learn>=1.2  # 1.2未満でも動くようRMSEは後方互換対応済み
-pandas>=2.1
-numpy>=1.26
-matplotlib>=3.8
-"""
-with st.expander("📦 requirements.txt (コピー用)"):
-    st.code(REQ_TXT.strip())
-
-# ---------------------------------------------------------------
-# 8) CART 可視化から読み取れること（大学生向け解説）
-# ---------------------------------------------------------------
-with st.expander("📊 CARTからわかること（California Housing）"):
-    st.markdown(
-        """
-        **1️⃣ 価格を左右する主要因が見えてくる**  
-        CART（決定木回帰）を使うと、どの要素が住宅価格に強く影響しているかが「分岐」として目で見てわかります。  
-        例：  
-        - 「**世帯所得（MedInc）** が高いほど住宅価格も高い」  
-        - 「**緯度（Latitude）や経度（Longitude）** から、沿岸部ほど高く、内陸部ほど安い傾向」  
-        → 価格を決める **地域性と経済的要因** が明確になります。
-        
-        **2️⃣ モデルの“考え方”が木構造でわかる**  
-        回帰木は「もし～なら～」という **条件分岐の連続** です。  
-        例：「もし世帯所得が5.5万ドルより低ければ → 次に築年数を確認 → さらに緯度で分岐」  
-        → CARTは **価格を説明する要因を段階的にたどる仕組み** を可視化します。
-        
-        **3️⃣ 複雑なデータを2次元で直感的に見る**  
-        2つの特徴量（例：`MedInc` × `Latitude`）を選び、他を中央値で固定すると、  
-        **ヒートマップで「高価格エリア」と「低価格エリア」** が色の濃淡として見えます。  
-        → 「所得が高く、海岸に近い地域ほど価格が高い」など、**地理的・社会経済的傾向** を視覚的に確認できます。
-        
-        **4️⃣ 限界も見えてくる**  
-        CARTは直線ではなく“階段状”に分けるため、ヒートマップでも **境界がブロック状** に見えます。  
-        → これはCARTの特徴で、**シンプルなルールで複雑な現象を近似している** ことを意味します。
-        
-        **5️⃣ 学びのポイント**  
-        - **CARTは「説明が見えるAI」**：どの要因がどんな順序で効いているかが明確。  
-        - **分析の第一歩**として、「どんな変数が価格に影響していそうか」を把握するのに最適。  
-        - 将来的には **ランダムフォレスト** や **勾配ブースティング** などへ発展可能。
-        
-        ---
-        💬 **まとめ**  
-        「California HousingデータをCARTで可視化すると、住宅価格を左右する主要因（世帯所得・地域性など）や  
-        その分岐構造が“木”として見える。価格の地域差や経済的背景を直感的に理解できるのがCARTの魅力です。」
-        """
-    )
